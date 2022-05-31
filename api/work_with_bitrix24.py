@@ -1,37 +1,84 @@
 import os
 import queue
-from typing import Dict, List, Any
-from models import ContactBitrixModel, DealBitrixModel, TaskBitrixModel, ContactModel, DealModel, TaskModel
-from fast_bitrix24 import BitrixAsync
-from isdayoff import DateType, ProdCalendar
 import datetime
+from dotenv import load_dotenv
+from isdayoff import DateType, ProdCalendar
+from fast_bitrix24 import BitrixAsync
+from pydantic import BaseModel
+from typing import Optional
+
 JSON = [dict(), list()]
 
-# create connection to bitrix24 server
+load_dotenv()
+webhook = os.getenv("WEBHOOK")
 
 
-class Bitrix:
-    def __init__(self, webhook):
-        self.connection = BitrixAsync(webhook)
+class BitrixServer:
+    def __init__(self):
+        self.__connection = BitrixAsync(webhook)
 
     def __enter__(self):
-        return self.connection
+        return self.__connection
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.connection = None
+        self.__connection = None
 
 
-class BitrixContact(Bitrix, ContactBitrixModel):
-    # def __int__(self, **kwargs):
-    #     super(Bitrix).__init__(webhook=kwargs.get("webhook"))
-    #     for key, values in kwargs.get("contact").items():
-    #         self.key = values
-    #     print(self.__dict__)
+class ContactModel(BaseModel):
+    """
+    {
+        "name": "Jon",
+        "surname": "Karter",
+        "phone": "+77777777777",
+        "adress": "st. Mira, 287, Moscow"
+        }
+    """
+    name: str
+    surname: str
+    phone: str
+    address: str
+    id: Optional[int] = None
 
+
+class ContactBitrixModel(ContactModel):
+    def get_json_contact(self, contact):
+        json_data = {"fields": {
+            "NAME": contact.name,
+            "LAST_NAME": contact.surname,
+            "OPENED": "Y",
+            "TYPE_ID": "CLIENT",
+            "SOURCE_ID": "SELF",
+            "PHONE": [{"VALUE": contact.phone, "VALUE_TYPE": "WORK"}],
+            "ADDRESS": contact.address
+        },
+            "params": {"REGISTER_SONET_EVENT": "Y"}}
+        return json_data
+
+    def get_json_find_contact(self, contact):
+        """
+        "crm.contact.list",
+        {
+            filter: {"TYPE_ID": "CLIENT"},
+            select: ["ID", "NAME", "LAST_NAME", "TYPE_ID", "SOURCE_ID"]
+        }
+        :param contact data from response to server
+        :returns [ID]
+        """
+        json_data = {"filter": {
+            "PHONE": contact.phone},
+            "select": ["ID"]
+        }
+        return json_data
+
+
+class BitrixContact(ContactBitrixModel):
     async def find_contact(self, contact) -> int:
+
         json_data = self.get_json_find_contact(contact)
         method = "crm.contact.list"
-        response = await self.connection.call(method, json_data, raw=True)
+
+        with BitrixServer() as server:
+            response = await server.call(method, json_data, raw=True)
 
         if not response:
             contact_id = await self.create_contact(contact)
@@ -42,11 +89,76 @@ class BitrixContact(Bitrix, ContactBitrixModel):
     async def create_contact(self, contact) -> JSON:
         json_data = self.get_json_contact(contact)
         method = "crm.contact.add.json"
-        response = await self.connection.call(method, json_data, raw=True)
+        with BitrixServer() as server:
+            response = await server.call(method, json_data, raw=True)
         return response
 
 
-class BitrixDeal(Bitrix, DealBitrixModel):
+class DealModel(BaseModel):
+    """
+        {
+            "title": "title",
+            "description": "Some description",
+            "client": Contact,
+            "products": ["Candy", "Carrot", "Potato"],
+            "delivery_adress": "st. Mira, 211, Ekaterinburg",
+            "delivery_date": "2021-01-01:16:00",
+            "delivery_code": "#232nkF3fAdn"
+        }
+    """
+    title: str
+    description: str
+    client: BitrixContact
+    products: list
+    delivery_address: str
+    delivery_date: str
+    delivery_code: str
+    id: Optional[int] = None
+
+
+class DealBitrixModel(DealModel):
+    def get_json_for_find(self, deal):
+        json_data = {"filter": {"TITLE": deal.delivery_code},
+                     "select": ["CONTACT_ID", "COMMENTS"]
+                     }
+        return json_data
+
+    def get_string_deal(self, deal):
+        deal_str = f"TITLE: {deal.title},\n" \
+                   f"DESCRIPTION: {deal.description},\n" \
+                   f"PRODUCTS: {deal.products},\n" \
+                   f"DELIVERY_ADDRESS: {deal.delivery_address},\n" \
+                   f"DELIVERY_DATE: {deal.delivery_date}\n"
+        return deal_str
+
+    def get_json_for_add(self, deal):
+        json_data = {"fields": {
+            "TITLE": deal.delivery_code,
+            "CONTACT_ID": deal.client.id,
+            "COMMENTS": self.get_string_deal(deal)},
+            "params": {"REGISTER_SONET_EVENT": "Y"}
+        }
+        return json_data
+
+    def get_json_for_update_client_id(self, deal):
+        json_data = {"id": deal.id,
+                     "items": [{"CONTACT_ID": deal.client.id}]}
+        return json_data
+
+    def get_json_for_update(self, deal):
+        json_data = {
+            "id": deal.id,
+            "fields": {
+                "TITLE": deal.delivery_code,
+                "CONTACT_ID": deal.client.id,
+                "COMMENTS": self.get_string_deal(deal)
+            },
+            "params": {"REGISTER_SONET_EVENT": "Y"}
+        }
+        return json_data
+
+
+class BitrixDeal(DealBitrixModel):
     message = []
 
     async def add_deal(self, deal) -> list[str]:
@@ -64,12 +176,14 @@ class BitrixDeal(Bitrix, DealBitrixModel):
     async def find_deal(self, deal) -> dict:
         json_data = self.get_json_for_find(deal)
         method = "crm.deal.list"
-        deal_from_bitrix = await self.connection.call(method, json_data, raw=True)
 
-        if deal_from_bitrix:
+        with BitrixServer() as server:
+            response = await server.call(method, json_data, raw=True)
+
+        if response:
             self.message.append("Deal found")
-            deal.id = deal_from_bitrix[0]['ID']
-            return deal_from_bitrix[0]
+        deal.id = response[0]['ID']
+        return response[0]
 
     def diff_dials(self, deal, deal_from_bitrix) -> bool:
         if (deal_from_bitrix["CONTACT_ID"] != deal.client.id) \
@@ -79,9 +193,11 @@ class BitrixDeal(Bitrix, DealBitrixModel):
     async def create_deal(self, deal) -> JSON:
         json_data = self.get_json_for_add(deal)
         method = "crm.deal.add.json"
-        result = await self.connection.call(method, json_data, raw=True)
 
-        if result:
+        async with BitrixServer.connection.call(method, json_data, raw=True) as response:
+            response = await response
+
+        if response:
             self.message.append("Deal created")
             await self.update_deal_client(deal)
             return {"status": "200", "message": self.message}
@@ -89,17 +205,21 @@ class BitrixDeal(Bitrix, DealBitrixModel):
     async def update_deal_client(self, deal) -> None:
         json_data = self.get_json_for_update_client_id(deal)
         method = "crm.deal.contact.items.set"
-        result = await self.connection.call(method, json_data, raw=True)
 
-        if result:
+        with BitrixServer() as server:
+            response = await server.call(method, json_data, raw=True)
+
+        if response:
             self.message.append("client of dial updated")
 
     async def update_deal(self, deal) -> None:
         json_data = self.get_json_for_update(deal)
         method = "crm.deal.update.json"
-        result = await self.connection.call(method, json_data, raw=True)
 
-        if result:
+        with BitrixServer() as server:
+            response = await server.call(method, json_data, raw=True)
+
+        if response:
             self.message.append("Deal updated")
             await self.update_deal_client(deal)
 
@@ -110,15 +230,38 @@ class BitrixDeal(Bitrix, DealBitrixModel):
 q = queue.Queue()
 
 
-class BitrixTask(Bitrix, TaskBitrixModel):
+class TaskFieldsModel(BaseModel):
+    """{"TITLE": title, "RESPONSIBLE_ID": 1}"""
+    TITLE: str
+    RESPONSIBLE_ID: str
+
+
+class TaskModel(BaseModel):
+    """{"fields": {...}}"""
+    fields: TaskFieldsModel
+
+
+class TaskBitrixModel(TaskModel):
+    def get_json_for_add(self, task):
+        # title = "task for test"
+        json_data = {"fields": {
+            "TITLE": task.fields.TITLE,
+            "RESPONSIBLE_ID": 1}
+        }
+        return json_data
+
+
+class BitrixTask(TaskBitrixModel):
 
     async def push_task_to_server(self, task) -> JSON:
         json_data = self.get_json_for_add(task)
         method = "tasks.task.add"
-        response = await self.connection.call(method, json_data, raw=True)
+        with BitrixServer() as server:
+            response = await server.call(method, json_data, raw=True)
         print(response)
 
     async def add_task(self, task):
+
         q.put(task)
         if await self.where_holidays():
             while not q.empty():
@@ -130,10 +273,22 @@ class BitrixTask(Bitrix, TaskBitrixModel):
         return {"status": "200", "message": "Task save to queue"}
 
     async def where_holidays(self):
-        calendar = ProdCalendar()
-        for delta_days in range(3):
-            future_date = datetime.datetime.today() + datetime.timedelta(days=delta_days)
-            print(future_date)
-            future_date_bool = await calendar.date(date=future_date) == DateType.NOT_WORKING
-            if future_date_bool:
-                return future_date_bool
+        # calendar = ProdCalendar()
+        async with Calendar() as calendar:
+            for delta_days in range(5):
+                future_date = datetime.datetime.today() + datetime.timedelta(days=delta_days)
+                future_date_bool = await calendar.date(date=future_date) == DateType.NOT_WORKING
+
+                print(future_date, future_date_bool)
+
+                if future_date_bool:
+                    return future_date_bool
+
+
+class Calendar(ProdCalendar):
+    async def __aenter__(self):
+        self.conn = super()
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.conn.close()
