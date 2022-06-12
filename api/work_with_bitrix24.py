@@ -5,17 +5,15 @@ from dotenv import load_dotenv
 from isdayoff import DateType, ProdCalendar
 from fast_bitrix24 import BitrixAsync
 from pydantic import BaseModel
-from typing import Optional
-
-JSON = [dict(), list()]
+from typing import Optional, Union, List, Dict
 
 load_dotenv()
-webhook = os.getenv("WEBHOOK")
+WEBHOOK = os.getenv("WEBHOOK")
 
 
 class BitrixServer:
     def __init__(self):
-        self.__connection = BitrixAsync(webhook)
+        self.__connection = BitrixAsync(WEBHOOK)
 
     def __enter__(self):
         return self.__connection
@@ -86,7 +84,7 @@ class BitrixContact(ContactBitrixModel):
         else:
             return response[0]["ID"]
 
-    async def create_contact(self, contact) -> JSON:
+    async def create_contact(self, contact) -> Union[Dict, List]:
         json_data = self.get_json_contact(contact)
         method = "crm.contact.add.json"
         with BitrixServer() as server:
@@ -190,12 +188,12 @@ class BitrixDeal(DealBitrixModel):
                 or (hash(deal_from_bitrix["COMMENTS"]) != hash(self.get_string_deal(deal))):
             return True
 
-    async def create_deal(self, deal) -> JSON:
+    async def create_deal(self, deal) -> Union[Dict, List]:
         json_data = self.get_json_for_add(deal)
         method = "crm.deal.add.json"
-
-        async with BitrixServer.connection.call(method, json_data, raw=True) as response:
-            response = await response
+        async with BitrixServer() as server:
+            async with server.call(method, json_data, raw=True) as response:
+                response = await response
 
         if response:
             self.message.append("Deal created")
@@ -227,6 +225,7 @@ class BitrixDeal(DealBitrixModel):
         print(self.message)
 
 
+# TODO Move Redis
 q = queue.Queue()
 
 
@@ -253,34 +252,31 @@ class TaskBitrixModel(TaskModel):
 
 class BitrixTask(TaskBitrixModel):
 
-    async def push_task_to_server(self, task) -> JSON:
+    async def push_task_to_server(self, task) -> Union[Dict, List]:
         json_data = self.get_json_for_add(task)
         method = "tasks.task.add"
         with BitrixServer() as server:
             response = await server.call(method, json_data, raw=True)
-        print(response)
+        return response
 
     async def add_task(self, task):
-
         q.put(task)
         if await self.where_holidays():
             while not q.empty():
                 task = q.get()
                 response = await self.push_task_to_server(task)
-                if not response:
-                    q.put(task)
-            return {"status": "200", "message": "Task added"}
-        return {"status": "200", "message": "Task save to queue"}
+            if not response:
+                q.put(task)
+                return {"status": "200", "message": "Task save to queue"}
+
+        return {"status": "200", "message": "Task added"}
 
     async def where_holidays(self):
-        # calendar = ProdCalendar()
         async with Calendar() as calendar:
             for delta_days in range(5):
                 future_date = datetime.datetime.today() + datetime.timedelta(days=delta_days)
                 future_date_bool = await calendar.date(date=future_date) == DateType.NOT_WORKING
-
-                print(future_date, future_date_bool)
-
+                # print(future_date, future_date_bool)
                 if future_date_bool:
                     return future_date_bool
 

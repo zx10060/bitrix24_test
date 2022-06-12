@@ -1,13 +1,8 @@
-import os
 from fastapi import FastAPI
-from dotenv import load_dotenv
-
 from .work_with_bitrix24 import BitrixDeal, BitrixTask
 
 
 app = FastAPI()
-load_dotenv()
-WEBHOOK = os.getenv("WEBHOOK")
 
 
 @app.post("/api/deal/")
